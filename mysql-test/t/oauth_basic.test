@@ -76,6 +76,21 @@ eval SET GLOBAL vsql_oauth2.public_key = '$pubkey';
 --enable_query_log
 
 --echo #
+--echo # With audience configured, the same valid token is rejected: it has no
+--echo # aud claim at all, so the configured check cannot be satisfied. Resetting
+--echo # audience back to empty (the default, aud check disabled) restores the
+--echo # original accept -- round-tripping the sysvar through a live SET GLOBAL
+--echo # and a real login confirms it (not just a null/empty backing pointer).
+--echo #
+SET GLOBAL vsql_oauth2.audience = 'some-client-id';
+--error 1
+--exec $MYSQL --enable_cleartext_plugin --user=oauth_user --password=$valid_token -e "SELECT 1" 2>&1
+--disable_query_log
+SET GLOBAL vsql_oauth2.audience = '';
+--enable_query_log
+--exec $MYSQL --enable_cleartext_plugin --user=oauth_user --password=$valid_token -e "SELECT CURRENT_USER(), @@external_user"
+
+--echo #
 --echo # Without --enable_cleartext_plugin the client refuses to send the token
 --echo # in cleartext -> connection fails (client-side gating).
 --echo #

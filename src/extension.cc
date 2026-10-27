@@ -55,8 +55,15 @@ namespace sv = vsql::preview_sys_var;
 
 namespace {
 
-// System variables feeding oauth_core. Backing globals are read directly during
-// authentication (string reads are stable for the duration of a handler call).
+// System variables feeding oauth_core. The STRING backing globals below are
+// never dereferenced directly: a SET GLOBAL on a string sysvar frees the old
+// buffer from the setting thread, so reading the raw pointer from an
+// in-flight authenticate() call on another connection races that free (a
+// use-after-free, not merely a stale read). read_str_sysvar() below is the
+// only safe read -- it asks the server for a copy under its own lock (see
+// SysVarCapability::get() in preview/sys_var.h). The non-STRING globals
+// (auto_create, auto_grant, jwks_refresh_interval, jwks_http_timeout) are
+// plain words with no such hazard and are still read directly.
 // Names are bare here; the server exposes them prefixed as vsql_oauth2_<name>.
 char *g_issuer = nullptr;
 char *g_audience = nullptr;
@@ -150,6 +157,18 @@ auto SYS_VARS = sv::make_capability({
         &g_auto_grant, g_auto_grant_names, /*def_val=*/0),
 });
 
+// The only safe way to read a STRING sysvar (see the comment on the backing
+// globals above): asks the server for a copy of the current value under its
+// own lock, rather than racing a concurrent SET GLOBAL on the raw pointer.
+// `name` is the bare variable name (no vsql_oauth2_ prefix). Leaves `out`
+// unchanged on error -- every call site below declares `out` already holding
+// the right not-configured fallback (empty, or a caller-supplied default),
+// so a failed read degrades to that fallback exactly as a null backing
+// pointer used to.
+bool read_str_sysvar(const char *name, std::string &out) {
+  return !SYS_VARS.get("vsql_oauth2", name, out);
+}
+
 // Process-wide JWKS key cache, shared by all connections.
 vsql_oauth2::JwksCache g_jwks_cache;
 
@@ -158,7 +177,8 @@ vsql_oauth2::JwksCache g_jwks_cache;
 // is self-contained for this auth attempt. No key source -> nullptr, which
 // makes oauth_core fail closed.
 vsql_oauth2::KeyResolver build_key_resolver() {
-  const std::string jwks_url = g_jwks_url != nullptr ? g_jwks_url : "";
+  std::string jwks_url;
+  read_str_sysvar("jwks_url", jwks_url);
   if (!jwks_url.empty()) {
     const unsigned int refresh =
         static_cast<unsigned int>(g_jwks_refresh_interval);
@@ -173,7 +193,8 @@ vsql_oauth2::KeyResolver build_key_resolver() {
     };
   }
 
-  const std::string pem = g_public_key != nullptr ? g_public_key : "";
+  std::string pem;
+  read_str_sysvar("public_key", pem);
   if (pem.empty())
     return nullptr;
   return [pem](const std::string & /*kid*/, std::string &out_pem,
@@ -187,21 +208,18 @@ vsql_oauth2::KeyResolver build_key_resolver() {
 // AS '...' clause.
 vsql_oauth2::Config build_config(vsql::preview_auth::AuthContext &c) {
   vsql_oauth2::Config config;
-  if (g_issuer != nullptr)
-    config.issuer = g_issuer;
-  if (g_audience != nullptr)
-    config.audience = g_audience;
+  read_str_sysvar("issuer", config.issuer);
+  read_str_sysvar("audience", config.audience);
   config.resolve_key = build_key_resolver();
-  if (g_username_claim != nullptr && g_username_claim[0] != '\0')
-    config.username_claim = g_username_claim;
-  if (g_roles_claim != nullptr)
-    config.roles_claim = g_roles_claim;
-  if (g_roles_filter != nullptr)
-    config.roles_filter = g_roles_filter;
-  if (g_roles_transform_pattern != nullptr)
-    config.roles_transform_pattern = g_roles_transform_pattern;
-  if (g_roles_transform_replacement != nullptr)
-    config.roles_transform_replacement = g_roles_transform_replacement;
+  std::string username_claim;
+  if (read_str_sysvar("username_claim", username_claim) &&
+      !username_claim.empty())
+    config.username_claim = username_claim;
+  read_str_sysvar("roles_claim", config.roles_claim);
+  read_str_sysvar("roles_filter", config.roles_filter);
+  read_str_sysvar("roles_transform_pattern", config.roles_transform_pattern);
+  read_str_sysvar("roles_transform_replacement",
+                  config.roles_transform_replacement);
   const char *as = c.auth_string();
   if (as != nullptr)
     config.auth_string = as;
@@ -244,8 +262,11 @@ authenticate_impl(vsql::preview_auth::AuthContext &c) {
   const std::string token(vsql_oauth2::token_from_packet(
       pkt.data(), static_cast<int64_t>(pkt.size()), c.client_auth_plugin()));
 
-  const vsql_oauth2::Decision decision =
-      vsql_oauth2::evaluate(token, build_config(c));
+  // Built once and reused below (the roles_configured check) so both see the
+  // same sysvar snapshot for this attempt, rather than a second raw read that
+  // could race a concurrent SET GLOBAL independently of this one.
+  const vsql_oauth2::Config config = build_config(c);
+  const vsql_oauth2::Decision decision = vsql_oauth2::evaluate(token, config);
 
   // Fail closed: only an explicit accept authenticates. reject_reason is for
   // the server error log only and is never surfaced to the client.
@@ -289,9 +310,9 @@ authenticate_impl(vsql::preview_auth::AuthContext &c) {
   // a configured-but-empty claim stages an explicit empty set (SET ROLE NONE,
   // and under SYNC the authoritative "no roles" that revokes all). Only an
   // unset roles_claim skips the call, leaving the account's default roles
-  // untouched.
-  const bool roles_configured =
-      g_roles_claim != nullptr && g_roles_claim[0] != '\0';
+  // untouched. Reuses the `config` built above (the same safe sysvar
+  // snapshot `evaluate()` was given), rather than re-reading the raw global.
+  const bool roles_configured = !config.roles_claim.empty();
   if (roles_configured) {
     std::vector<const char *> role_ptrs;
     role_ptrs.reserve(decision.roles.size());

@@ -38,6 +38,18 @@ ERROR 1045 (28000): Access denied for user 'oauth_user'@'localhost' (using passw
 mysql: [Warning] Using a password on the command line interface can be insecure.
 ERROR 1045 (28000): Access denied for user 'oauth_user'@'localhost' (using password: NO)
 #
+# With audience configured, the same valid token is rejected: it has no
+# aud claim at all, so the configured check cannot be satisfied. Resetting
+# audience back to empty (the default, aud check disabled) restores the
+# original accept -- round-tripping the sysvar through a live SET GLOBAL
+# and a real login confirms it (not just a null/empty backing pointer).
+#
+SET GLOBAL vsql_oauth2.audience = 'some-client-id';
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 1045 (28000): Access denied for user 'oauth_user'@'localhost' (using password: NO)
+CURRENT_USER()	@@external_user
+oauth_mapped_user@%	oauth_mapped_user
+#
 # Without --enable_cleartext_plugin the client refuses to send the token
 # in cleartext -> connection fails (client-side gating).
 #
