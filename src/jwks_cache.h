@@ -22,6 +22,20 @@
 
 namespace vsql_oauth2 {
 
+// Count of JwksCache::lookup_pem() calls that returned FETCH_FAILED (an
+// HTTP/parse failure with no usable cached keys left to fall back on) --
+// the one case where a repeatedly misconfigured or unreachable IdP endpoint
+// is otherwise invisible short of grepping the error log for individual
+// failed logins. extension.cc owns the preview_status_var wiring (and so
+// the SHOW STATUS exposure) and registers this variable's address; this
+// header only declares the storage so neither file needs a VEF/preview
+// include the other doesn't already need. lookup_pem() increments it with
+// __atomic_fetch_add: its own std::lock_guard<mu_> serializes the many
+// connection threads that can reach the increment against each other, but
+// the status_var machinery reads this via SHOW STATUS without taking mu_,
+// so the atomic keeps that read torn-read-free too.
+extern long long g_jwks_fetch_failures;
+
 // Caches IdP signing keys fetched from a JWKS endpoint, mapping each key id
 // (kid) to a PEM-encoded public key. Verification keys rotate, so the cache
 // refreshes on a TTL and on a kid miss (forced refetch). Thread-safe: many
