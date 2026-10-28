@@ -152,10 +152,7 @@ auto SYS_VARS = sv::make_capability({
         &g_auto_grant, g_auto_grant_names, /*def_val=*/0),
 });
 
-// Operator-visible counter for repeated JWKS fetch failures (e.g. a
-// misconfigured or unreachable IdP endpoint) -- see the storage declaration
-// and __atomic_fetch_add comment in jwks_cache.h/.cc. Exposed as
-// vsql_oauth2_jwks_fetch_failures via SHOW STATUS.
+// Shown in SHOW STATUS as vsql_oauth2.jwks_fetch_failures.
 auto STATUS_VARS = svar::make_capability({
     svar::make_int("jwks_fetch_failures", &vsql_oauth2::g_jwks_fetch_failures),
 });
